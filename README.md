@@ -1,0 +1,1 @@
+Very simple PowerShell script that connects to a running Power BI Desktop application, extract the model, and saves this to an XMLA file that can be used to transfer the model into Analysis Services running in Tabluar mode.
