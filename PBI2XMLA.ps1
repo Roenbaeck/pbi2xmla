@@ -31,20 +31,123 @@ $server.Connect($connectionString)
 $database = $server.Databases[0]
 
 # 4. Serialize the Model to TMSL (JSON)
-# This creates the "Create Database" script
-$options = [Microsoft.AnalysisServices.Tabular.SerializeOptions]::Default
+$options = New-Object Microsoft.AnalysisServices.Tabular.SerializeOptions
+$options.IgnoreTimestamps = $true
+$options.IgnoreInferredObjects = $true
+$options.IgnoreInferredProperties = $true
+$options.SplitMultilineStrings = $false
+
 $script = [Microsoft.AnalysisServices.Tabular.JsonSerializer]::SerializeDatabase($database, $options)
 $scriptObj = $script | ConvertFrom-Json
+
+# Set name and compatibility level for SSAS 2022
 $scriptObj.name = "PowerBIModel"
+$scriptObj.compatibilityLevel = 1600
+
+# Function to recursively remove specified properties from all objects
+function Remove-Properties {
+    param ($obj, [string[]]$properties)
+    if ($obj -is [PSCustomObject]) {
+        foreach ($prop in $properties) {
+            $obj.PSObject.Properties.Remove($prop)
+        }
+        foreach ($objProp in @($obj.PSObject.Properties)) {
+            if ($objProp.Value -is [PSCustomObject] -or $objProp.Value -is [Array]) {
+                Remove-Properties -obj $objProp.Value -properties $properties
+            }
+        }
+    } elseif ($obj -is [Array]) {
+        foreach ($item in $obj) {
+            Remove-Properties -obj $item -properties $properties
+        }
+    }
+}
+
+# Remove all problematic Power BI specific properties recursively
+$propsToRemove = @(
+    'lineageTag', 
+    'changedProperties', 
+    'annotations', 
+    'modifiedTime', 
+    'structureModifiedTime', 
+    'refreshedTime', 
+    'sourceProviderType', 
+    'attributeHierarchy', 
+    'summarizeBy', 
+    'partitions', 
+    'extendedProperties', 
+    'expressions', 
+    'queryGroups', 
+    'state', 
+    'relyOnReferentialIntegrity',
+    'defaultPowerBIDataSourceVersion',
+    'discourageImplicitMeasures',
+    'dataAccessOptions',
+    'sourceQueryCulture',
+    'createdTimestamp',
+    'lastUpdate',
+    'lastSchemaUpdate',
+    'lastProcessed',
+    'dataSources',
+    'cultures'
+)
+Remove-Properties -obj $scriptObj -properties $propsToRemove
+
+# Remove rowNumber columns and dataType from measures
+foreach ($table in $scriptObj.model.tables) {
+    if ($table.columns) {
+        $table.columns = @($table.columns | Where-Object { -not $_.PSObject.Properties['type'] -or $_.type -ne 'rowNumber' })
+    }
+    if ($table.measures) {
+        foreach ($measure in $table.measures) {
+            $measure.PSObject.Properties.Remove('dataType')
+        }
+    }
+    if ($table.PSObject.Properties['type']) {
+        $table.PSObject.Properties.Remove('type')
+    }
+    
+    # Add partition for each table (required by SSAS)
+    $table | Add-Member -NotePropertyName 'partitions' -NotePropertyValue @(
+        @{
+            name = $table.name
+            mode = 'import'
+            source = @{
+                type = 'query'
+                query = "SELECT * FROM [$($table.name)]"
+                dataSource = 'SqlServer localhost'
+            }
+        }
+    ) -Force
+}
+
+# Add a placeholder data source
+$scriptObj.model | Add-Member -NotePropertyName 'dataSources' -NotePropertyValue @(
+    @{
+        name = 'SqlServer localhost'
+        connectionString = 'Provider=SQLNCLI11;Data Source=localhost;Initial Catalog=YourDatabase;Integrated Security=SSPI'
+        impersonationMode = 'impersonateServiceAccount'
+    }
+) -Force
+
+# Create the TMSL command
 $scriptWrapped = @{
-    create = @{
+    createOrReplace = @{
+        object = @{
+            database = "PowerBIModel"
+        }
         database = $scriptObj
     }
-} | ConvertTo-Json -Depth 100
+}
+
+# Convert to JSON
+$jsonOutput = $scriptWrapped | ConvertTo-Json -Depth 100
 
 # 5. Output to file
 $outputPath = "$env:USERPROFILE\Desktop\PowerBI_Model_Export.json"
-$scriptWrapped | Out-File $outputPath
+$jsonOutput | Out-File $outputPath -Encoding UTF8
 
 Write-Host "Success! Model definition exported to $outputPath"
 Write-Host "You can now open this JSON in SSMS and execute it against your SSAS Tabular server."
+Write-Host ""
+Write-Host "NOTE: Update the data source connection string before running on SSAS."
