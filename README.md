@@ -30,7 +30,13 @@
 
 ## Output
 
-The script generates a file named `PowerBI_Model_Export.json` on your **Desktop**. This JSON file contains a `createOrReplace` TMSL command that can be executed in SQL Server Management Studio (SSMS) against an SSAS Tabular instance.
+The script generates a file named `PowerBI_Model_Export.json` on your **Desktop**. This JSON file contains a `createOrReplace` TMSL command. 
+
+To deploy the model to SSAS:
+1. Open **SQL Server Management Studio (SSMS)**.
+2. Connect to your **Analysis Services** Tabular instance.
+3. Open a new **XMLA Query** window (**New Query** -> **XMLA**).
+4. Paste the content of the generated JSON file and execute it.
 
 ## Crucial Note on Mixed Mode Models
 
