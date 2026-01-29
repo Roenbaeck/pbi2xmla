@@ -1,4 +1,7 @@
 ﻿# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+param(
+    [string]$SqlServerOverride = ""
+)
 # 1. Load the Analysis Services Libraries
 try {
     Add-Type -Path "C:\Program Files\Microsoft Power BI Desktop\bin\Microsoft.AnalysisServices.Server.Tabular.dll"
@@ -86,8 +89,13 @@ if ($modelDataSources.Count -eq 0) {
             if ($m -match 'Sql\.Database\("([^"]+)",\s*"([^"]+)"\)') {
                 $srv = $matches[1]
                 $db = $matches[2]
-                $dsName = "SqlServer $srv $db"
-                $connStr = "Provider=MSOLEDBSQL;Data Source=$srv;Initial Catalog=$db;Integrated Security=SSPI"
+                if ([string]::IsNullOrWhiteSpace($SqlServerOverride)) {
+                    $dsName = "SqlServer $srv $db"
+                    $connStr = "Provider=MSOLEDBSQL;Data Source=$srv;Initial Catalog=$db;Integrated Security=SSPI"
+                } else {
+                    $dsName = "SqlServer $SqlServerOverride $db"
+                    $connStr = "Provider=MSOLEDBSQL;Data Source=$SqlServerOverride;Initial Catalog=$db;Integrated Security=SSPI"
+                }
                 break
             }
         }
@@ -150,6 +158,9 @@ if ($modelDataSources.Count -gt 0) {
         $ds.PSObject.Properties.Remove('credential')
         $ds.PSObject.Properties.Remove('privacyLevel')
         if ($ds.PSObject.Properties['connectionDetails']) { $ds.PSObject.Properties.Remove('connectionString') }
+        if (-not [string]::IsNullOrWhiteSpace($SqlServerOverride) -and $ds.PSObject.Properties['connectionString']) {
+            $ds.connectionString = $ds.connectionString -replace 'Data Source=([^;]+)', "Data Source=$SqlServerOverride"
+        }
     }
 }
 
