@@ -68,7 +68,7 @@ function Remove-Properties {
 }
 
 # Remove all problematic Power BI specific properties recursively
-$propsToRemove = @('lineageTag', 'changedProperties', 'annotations', 'modifiedTime', 'structureModifiedTime', 'refreshedTime', 'sourceProviderType', 'attributeHierarchy', 'summarizeBy', 'extendedProperties', 'queryGroups', 'state', 'relyOnReferentialIntegrity', 'defaultPowerBIDataSourceVersion', 'discourageImplicitMeasures', 'dataAccessOptions', 'sourceQueryCulture', 'createdTimestamp', 'lastUpdate', 'lastSchemaUpdate', 'lastProcessed', 'cultures', 'variations')
+$propsToRemove = @('lineageTag', 'changedProperties', 'modifiedTime', 'structureModifiedTime', 'refreshedTime', 'sourceProviderType', 'summarizeBy', 'queryGroups', 'state', 'defaultPowerBIDataSourceVersion', 'sourceQueryCulture', 'createdTimestamp', 'lastUpdate', 'lastSchemaUpdate', 'lastProcessed', 'cultures', 'variations')
 Remove-Properties -obj $scriptObj -properties $propsToRemove
 
 # --- CRITICAL: Link M Partitions to Data Sources ---
