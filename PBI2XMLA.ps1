@@ -29,12 +29,13 @@ $server.Connect($connectionString)
 
 # There is usually only one database with a generic UUID name
 $database = $server.Databases[0]
+Write-Host "Model contains $($database.Model.DataSources.Count) data sources."
 
 # 4. Serialize the Model to TMSL (JSON)
 $options = New-Object Microsoft.AnalysisServices.Tabular.SerializeOptions
 $options.IgnoreTimestamps = $true
-$options.IgnoreInferredObjects = $true
-$options.IgnoreInferredProperties = $true
+$options.IgnoreInferredObjects = $false
+$options.IgnoreInferredProperties = $false
 $options.SplitMultilineStrings = $false
 
 $script = [Microsoft.AnalysisServices.Tabular.JsonSerializer]::SerializeDatabase($database, $options)
@@ -64,34 +65,93 @@ function Remove-Properties {
 }
 
 # Remove all problematic Power BI specific properties recursively
-$propsToRemove = @(
-    'lineageTag', 
-    'changedProperties', 
-    'annotations', 
-    'modifiedTime', 
-    'structureModifiedTime', 
-    'refreshedTime', 
-    'sourceProviderType', 
-    'attributeHierarchy', 
-    'summarizeBy', 
-    'partitions', 
-    'extendedProperties', 
-    'expressions', 
-    'queryGroups', 
-    'state', 
-    'relyOnReferentialIntegrity',
-    'defaultPowerBIDataSourceVersion',
-    'discourageImplicitMeasures',
-    'dataAccessOptions',
-    'sourceQueryCulture',
-    'createdTimestamp',
-    'lastUpdate',
-    'lastSchemaUpdate',
-    'lastProcessed',
-    'dataSources',
-    'cultures'
-)
+$propsToRemove = @('lineageTag', 'changedProperties', 'annotations', 'modifiedTime', 'structureModifiedTime', 'refreshedTime', 'sourceProviderType', 'attributeHierarchy', 'summarizeBy', 'extendedProperties', 'queryGroups', 'state', 'relyOnReferentialIntegrity', 'defaultPowerBIDataSourceVersion', 'discourageImplicitMeasures', 'dataAccessOptions', 'sourceQueryCulture', 'createdTimestamp', 'lastUpdate', 'lastSchemaUpdate', 'lastProcessed', 'cultures', 'variations')
 Remove-Properties -obj $scriptObj -properties $propsToRemove
+
+# --- CRITICAL: Link M Partitions to Data Sources ---
+$modelDataSources = @()
+if ($scriptObj.model.PSObject.Properties['dataSources']) { 
+    $modelDataSources = @($scriptObj.model.dataSources) 
+}
+
+if ($modelDataSources.Count -eq 0) {
+    # If no data sources found (common in PBI Desktop), we MUST create one for SSAS to authorize M queries
+    $dsName = "SqlServer localhost"
+    $connStr = "Provider=MSOLEDBSQL;Data Source=localhost;Initial Catalog=YourDatabase;Integrated Security=SSPI"
+    
+    # Try to extract actual connection info from the first partition's M code
+    foreach ($table in $scriptObj.model.tables) {
+        if ($table.partitions -and $table.partitions[0].source.expression) {
+            $m = $table.partitions[0].source.expression
+            if ($m -match 'Sql\.Database\("([^"]+)",\s*"([^"]+)"\)') {
+                $srv = $matches[1]
+                $db = $matches[2]
+                $dsName = "SqlServer $srv $db"
+                $connStr = "Provider=MSOLEDBSQL;Data Source=$srv;Initial Catalog=$db;Integrated Security=SSPI"
+                break
+            }
+        }
+    }
+    
+    $newDS = @{
+        name = $dsName
+        connectionString = $connStr
+        impersonationMode = "impersonateServiceAccount"
+    } | ConvertTo-Json | ConvertFrom-Json
+    
+    if (-not $scriptObj.model.PSObject.Properties['dataSources']) {
+        $scriptObj.model | Add-Member -NotePropertyName "dataSources" -NotePropertyValue @($newDS) -Force
+    } else {
+        $scriptObj.model.dataSources = @($newDS)
+    }
+    $modelDataSources = @($newDS)
+    Write-Host "Created missing Data Source: $dsName"
+}
+
+if ($modelDataSources.Count -gt 0) {
+    $primaryDSName = $modelDataSources[0].name
+    foreach ($table in $scriptObj.model.tables) {
+        if ($table.PSObject.Properties['partitions']) {
+            foreach ($partition in $table.partitions) {
+                if ($partition.PSObject.Properties['source']) {
+                    # SSAS does not accept M partitions. Convert M to query partitions.
+                    if ($partition.source.PSObject.Properties['type'] -and $partition.source.type -eq 'm') {
+                        $schema = 'dbo'
+                        $item = $table.name
+                        if ($partition.source.PSObject.Properties['expression']) {
+                            $m = $partition.source.expression
+                            if ($m -match '\[Schema\s*=\s*"([^"]+)",\s*Item\s*=\s*"([^"]+)"\]') {
+                                $schema = $matches[1]
+                                $item = $matches[2]
+                            }
+                        }
+                        $partition.source = @{
+                            type = 'query'
+                            query = "SELECT * FROM [$schema].[$item]"
+                            dataSource = $primaryDSName
+                        } | ConvertTo-Json | ConvertFrom-Json
+                        if ($partition.PSObject.Properties['dataSource']) {
+                            $partition.PSObject.Properties.Remove('dataSource')
+                        }
+                    }
+                    # For query partitions, dataSource belongs inside source
+                    elseif ($partition.source.PSObject.Properties['type'] -and $partition.source.type -eq 'query') {
+                        $partition.source | Add-Member -MemberType NoteProperty -Name "dataSource" -Value $primaryDSName -Force
+                    }
+                }
+            }
+        }
+    }
+}
+
+# Clean up Data Sources for SSAS
+if ($modelDataSources.Count -gt 0) {
+    foreach ($ds in $modelDataSources) {
+        $ds.PSObject.Properties.Remove('credential')
+        $ds.PSObject.Properties.Remove('privacyLevel')
+        if ($ds.PSObject.Properties['connectionDetails']) { $ds.PSObject.Properties.Remove('connectionString') }
+    }
+}
 
 # Remove rowNumber columns and dataType from measures
 foreach ($table in $scriptObj.model.tables) {
@@ -106,29 +166,7 @@ foreach ($table in $scriptObj.model.tables) {
     if ($table.PSObject.Properties['type']) {
         $table.PSObject.Properties.Remove('type')
     }
-    
-    # Add partition for each table (required by SSAS)
-    $table | Add-Member -NotePropertyName 'partitions' -NotePropertyValue @(
-        @{
-            name = $table.name
-            mode = 'import'
-            source = @{
-                type = 'query'
-                query = "SELECT * FROM [$($table.name)]"
-                dataSource = 'SqlServer localhost'
-            }
-        }
-    ) -Force
 }
-
-# Add a placeholder data source
-$scriptObj.model | Add-Member -NotePropertyName 'dataSources' -NotePropertyValue @(
-    @{
-        name = 'SqlServer localhost'
-        connectionString = 'Provider=SQLNCLI11;Data Source=localhost;Initial Catalog=YourDatabase;Integrated Security=SSPI'
-        impersonationMode = 'impersonateServiceAccount'
-    }
-) -Force
 
 # Create the TMSL command
 $scriptWrapped = @{
